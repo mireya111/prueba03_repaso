@@ -21,12 +21,24 @@ class _TurismoPageState extends State<TurismoPage> {
   final _resenaController = TextEditingController();
   final _descripcionController = TextEditingController();
   
+  // Nuevos controladores para publicaciones
+  final _publicacionFormKey = GlobalKey<FormState>();
+  final _mensajeController = TextEditingController();
+  
   Uint8List? _imageBytes;
   String? _imageName;
+  
+  // Nueva variable para imagen de publicación
+  Uint8List? _publicacionImageBytes;
+  String? _publicacionImageName;
+  
   bool _isLoading = false;
+  bool _isPublicacionLoading = false;
   String userRole = 'visitante';
   String userEmail = '';
+  String? profileImageUrl;
   List<dynamic> lugares = [];
+  List<dynamic> publicaciones = [];
   Position? _currentPosition;
 
   @override
@@ -36,13 +48,357 @@ class _TurismoPageState extends State<TurismoPage> {
     if (args != null) {
       userRole = args['userRole'] ?? 'visitante';
       userEmail = args['userEmail'] ?? '';
+      profileImageUrl = args['profileImageUrl'];
     }
     _loadLugares();
+    _loadPublicaciones();
     if (userRole == 'publicador') {
       _getCurrentLocation();
     }
   }
 
+  // Nueva función para cargar publicaciones
+  Future<void> _loadPublicaciones() async {
+    try {
+      final response = await supabase
+          .from('publicaciones')
+          .select('*')
+          .order('created_at', ascending: false);
+      
+      setState(() {
+        publicaciones = response;
+      });
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error al cargar publicaciones: $e')),
+      );
+    }
+  }
+
+  // Nueva función para seleccionar imagen de publicación (galería o cámara)
+  Future<void> _pickPublicacionImage() async {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Seleccionar imagen'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_library),
+                title: const Text('Galería'),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _pickImageFromSource(ImageSource.gallery);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.camera_alt),
+                title: const Text('Cámara'),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _pickImageFromSource(ImageSource.camera);
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // Nueva función para manejar ambas fuentes (galería y cámara)
+  Future<void> _pickImageFromSource(ImageSource source) async {
+    final picker = ImagePicker();
+    final result = await picker.pickImage(
+      source: source,
+      maxWidth: 1024,
+      maxHeight: 1024,
+      imageQuality: 80,
+    );
+    
+    if (result != null) {
+      final bytes = await result.readAsBytes();
+      final resizedBytes = await _resizeImage(bytes);
+      
+      setState(() {
+        _publicacionImageBytes = resizedBytes;
+        _publicacionImageName = source == ImageSource.camera 
+            ? 'camera_${DateTime.now().millisecondsSinceEpoch}.jpg'
+            : result.name;
+      });
+    }
+  }
+
+  // Nueva función para subir imagen de publicación
+  Future<String?> _uploadPublicacionImage() async {
+    if (_publicacionImageBytes == null || _publicacionImageName == null) return null;
+
+    try {
+      final fileName = 'publicaciones/${DateTime.now().millisecondsSinceEpoch}_$_publicacionImageName';
+      await supabase.storage.from('publicfotos').uploadBinary(fileName, _publicacionImageBytes!);
+      
+      final imageUrl = supabase.storage.from('publicfotos').getPublicUrl(fileName);
+      return imageUrl;
+    } catch (e) {
+      throw Exception('Error al subir imagen de publicación: $e');
+    }
+  }
+
+  // Nueva función para guardar publicación
+  Future<void> _guardarPublicacion() async {
+    if (!_publicacionFormKey.currentState!.validate()) return;
+
+    setState(() => _isPublicacionLoading = true);
+
+    try {
+      String? imageUrl;
+      if (_publicacionImageBytes != null) {
+        imageUrl = await _uploadPublicacionImage();
+      }
+
+      await supabase.from('publicaciones').insert({
+        'usuario': userEmail,
+        'mensaje': _mensajeController.text,
+        'url': imageUrl,
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Publicación agregada exitosamente')),
+      );
+
+      _publicacionFormKey.currentState!.reset();
+      _mensajeController.clear();
+      setState(() {
+        _publicacionImageBytes = null;
+        _publicacionImageName = null;
+      });
+      
+      _loadPublicaciones();
+
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error al guardar publicación: $e')),
+      );
+    } finally {
+      setState(() => _isPublicacionLoading = false);
+    }
+  }
+
+  // Función para mostrar diálogo de nueva publicación
+  void _showPublicacionDialog() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('Nueva Publicación'),
+              content: SizedBox(
+                width: MediaQuery.of(context).size.width * 0.8,
+                child: Form(
+                  key: _publicacionFormKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextFormField(
+                        controller: _mensajeController,
+                        decoration: const InputDecoration(
+                          labelText: 'Mensaje',
+                          border: OutlineInputBorder(),
+                          hintText: '¿Qué quieres compartir?',
+                        ),
+                        maxLines: 3,
+                        validator: (value) {
+                          if (value == null || value.isEmpty) {
+                            return 'Por favor ingresa un mensaje';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      Container(
+                        width: double.infinity,
+                        height: 150,
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.grey),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: _publicacionImageBytes != null
+                            ? ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: Image.memory(
+                                  _publicacionImageBytes!,
+                                  fit: BoxFit.cover,
+                                ),
+                              )
+                            : InkWell(
+                                onTap: () async {
+                                  await _pickPublicacionImage();
+                                  setDialogState(() {});
+                                },
+                                child: const Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(Icons.add_a_photo, size: 40, color: Colors.grey),
+                                    SizedBox(height: 8),
+                                    Text(
+                                      'Toca para agregar imagen\n(Galería o Cámara)',
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(color: Colors.grey),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                      ),
+                      if (_publicacionImageBytes != null) ...[
+                        const SizedBox(height: 8),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          children: [
+                            TextButton.icon(
+                              onPressed: () async {
+                                await _pickPublicacionImage();
+                                setDialogState(() {});
+                              },
+                              icon: const Icon(Icons.edit),
+                              label: const Text('Cambiar'),
+                            ),
+                            TextButton.icon(
+                              onPressed: () {
+                                setDialogState(() {
+                                  _publicacionImageBytes = null;
+                                  _publicacionImageName = null;
+                                });
+                              },
+                              icon: const Icon(Icons.delete),
+                              label: const Text('Eliminar'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: _isPublicacionLoading ? null : () {
+                    _mensajeController.clear();
+                    setState(() {
+                      _publicacionImageBytes = null;
+                      _publicacionImageName = null;
+                    });
+                    Navigator.pop(context);
+                  },
+                  child: const Text('Cancelar'),
+                ),
+                ElevatedButton(
+                  onPressed: _isPublicacionLoading ? null : () async {
+                    await _guardarPublicacion();
+                    Navigator.pop(context);
+                  },
+                  child: _isPublicacionLoading
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Publicar'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // Widget para mostrar una publicación
+  Widget _buildPublicacionCard(Map<String, dynamic> publicacion) {
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header con información del usuario
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                CircleAvatar(
+                  radius: 20,
+                  child: Text(
+                    publicacion['usuario']?.toString().isNotEmpty == true 
+                        ? publicacion['usuario'][0].toUpperCase() 
+                        : 'U',
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        publicacion['usuario'] ?? 'Usuario desconocido',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                      Text(
+                        publicacion['created_at'] != null 
+                            ? DateTime.parse(publicacion['created_at']).toString().substring(0, 16)
+                            : 'Fecha no disponible',
+                        style: const TextStyle(
+                          color: Colors.grey,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // Mensaje
+          if (publicacion['mensaje'] != null && publicacion['mensaje'].toString().isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Text(
+                publicacion['mensaje'],
+                style: const TextStyle(fontSize: 14),
+              ),
+            ),
+          // Imagen si existe
+          if (publicacion['url'] != null && publicacion['url'].toString().isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              constraints: const BoxConstraints(maxHeight: 400),
+              child: Image.network(
+                publicacion['url'],
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) {
+                  return Container(
+                    height: 200,
+                    color: Colors.grey[300],
+                    child: const Center(
+                      child: Icon(Icons.error, size: 50),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+          const SizedBox(height: 16),
+        ],
+      ),
+    );
+  }
+
+  // Resto de las funciones existentes...
   Future<void> _getCurrentLocation() async {
     try {
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
@@ -89,8 +445,6 @@ class _TurismoPageState extends State<TurismoPage> {
       );
     }
   }
-
-
 
   Future<void> _loadLugares() async {
     try {
@@ -270,7 +624,6 @@ class _TurismoPageState extends State<TurismoPage> {
     try {
       final imageUrl = await _uploadImage();
       
-      // Crear enlace de Google Maps con las coordenadas
       final googleMapsUrl = 'https://www.google.com/maps/search/?api=1&query=${_currentPosition!.latitude},${_currentPosition!.longitude}';
       
       await supabase.from('lugares').insert({
@@ -426,314 +779,413 @@ class _TurismoPageState extends State<TurismoPage> {
   }
 
   Widget _buildPublisherView() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            '¡Bienvenido, Publicador!',
-            style: TextStyle(
-              fontSize: 28,
-              fontWeight: FontWeight.bold,
+    return DefaultTabController(
+      length: 3,
+      child: Scaffold(
+        body: Column(
+          children: [
+            Container(
               color: Colors.green,
-            ),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 10),
-          Center(
-            child: ElevatedButton.icon(
-              onPressed: () => logout(context),
-              icon: const Icon(Icons.logout),
-              label: const Text('Cerrar Sesión'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red,
-                foregroundColor: Colors.white,
-              ),
-            ),
-          ),
-          const SizedBox(height: 20),
-          
-          // Información de ubicación
-          if (_currentPosition != null)
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.green[50],
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.green),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.location_on, color: Colors.green),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Ubicación obtenida: ${_currentPosition!.latitude.toStringAsFixed(4)}, ${_currentPosition!.longitude.toStringAsFixed(4)}',
-                      style: const TextStyle(color: Colors.green),
-                    ),
-                  ),
-                ],
-              ),
-            )
-          else
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.orange[50],
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.orange),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.warning, color: Colors.orange),
-                  const SizedBox(width: 8),
-                  const Expanded(
-                    child: Text(
-                      'Obteniendo ubicación GPS...',
-                      style: TextStyle(color: Colors.orange),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: _getCurrentLocation,
-                    child: const Text('Reintentar'),
-                  ),
+              child: const TabBar(
+                labelColor: Colors.white,
+                unselectedLabelColor: Colors.white70,
+                indicatorColor: Colors.white,
+                tabs: [
+                  Tab(icon: Icon(Icons.feed), text: 'Publicaciones'),
+                  Tab(icon: Icon(Icons.add_location), text: 'Lugares'),
+                  Tab(icon: Icon(Icons.list), text: 'Mis Lugares'),
                 ],
               ),
             ),
-          
-          const SizedBox(height: 20),
-          const Text(
-            'Agregar Nuevo Lugar Turístico',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 20),
-          
-          // Formulario existente...
-          Form(
-            key: _formKey,
-            child: Column(
-              children: [
-                TextFormField(
-                  controller: _nombreController,
-                  decoration: const InputDecoration(
-                    labelText: 'Nombre del lugar',
-                    border: OutlineInputBorder(),
+            Expanded(
+              child: TabBarView(
+                children: [
+                  // Tab de Publicaciones
+                  Column(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          children: [
+                            const Text(
+                              '¡Bienvenido, Publicador!',
+                              style: TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.green,
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            ElevatedButton.icon(
+                              onPressed: () => logout(context),
+                              icon: const Icon(Icons.logout),
+                              label: const Text('Cerrar Sesión'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.red,
+                                foregroundColor: Colors.white,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Divider(),
+                      Expanded(
+                        child: publicaciones.isEmpty
+                            ? const Center(
+                                child: Text(
+                                  'No hay publicaciones aún',
+                                  style: TextStyle(fontSize: 16, color: Colors.grey),
+                                ),
+                              )
+                            : ListView.builder(
+                                itemCount: publicaciones.length,
+                                itemBuilder: (context, index) {
+                                  return _buildPublicacionCard(publicaciones[index]);
+                                },
+                              ),
+                      ),
+                    ],
                   ),
-                  validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'Por favor ingresa el nombre';
-                    }
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 16),
-                
-                TextFormField(
-                  controller: _ubicacionController,
-                  decoration: const InputDecoration(
-                    labelText: 'Ubicación (Google Maps)',
-                    border: OutlineInputBorder(),
-                    helperText: 'Se generará automáticamente con GPS',
-                  ),
-                  readOnly: true,
-                  validator: (value) {
-                    if (_currentPosition == null) {
-                      return 'Se requiere ubicación GPS';
-                    }
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 16),
-                
-                TextFormField(
-                  controller: _resenaController,
-                  decoration: const InputDecoration(
-                    labelText: 'Reseña',
-                    border: OutlineInputBorder(),
-                  ),
-                  maxLines: 3,
-                  validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'Por favor ingresa una reseña';
-                    }
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 16),
-                
-                TextFormField(
-                  controller: _descripcionController,
-                  decoration: const InputDecoration(
-                    labelText: 'Descripción',
-                    border: OutlineInputBorder(),
-                  ),
-                  maxLines: 4,
-                  validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'Por favor ingresa una descripción';
-                    }
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 16),
-                
-                Container(
-                  width: double.infinity,
-                  height: 200,
-                  decoration: BoxDecoration(
-                    border: Border.all(color: Colors.grey),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: _imageBytes != null
-                      ? ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: Image.memory(
-                            _imageBytes!,
-                            fit: BoxFit.cover,
+                  // Tab de Agregar Lugares (contenido existente)
+                  SingleChildScrollView(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Agregar Nuevo Lugar Turístico',
+                          style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(height: 20),
+                        
+                        if (_currentPosition != null)
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: Colors.green[50],
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.green),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.location_on, color: Colors.green),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    'Ubicación obtenida: ${_currentPosition!.latitude.toStringAsFixed(4)}, ${_currentPosition!.longitude.toStringAsFixed(4)}',
+                                    style: const TextStyle(color: Colors.green),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        else
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: Colors.orange[50],
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.orange),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.warning, color: Colors.orange),
+                                const SizedBox(width: 8),
+                                const Expanded(
+                                  child: Text(
+                                    'Obteniendo ubicación GPS...',
+                                    style: TextStyle(color: Colors.orange),
+                                  ),
+                                ),
+                                TextButton(
+                                  onPressed: _getCurrentLocation,
+                                  child: const Text('Reintentar'),
+                                ),
+                              ],
+                            ),
                           ),
-                        )
-                      : InkWell(
-                          onTap: _showImagePickerDialog,
-                          child: const Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
+                        
+                        const SizedBox(height: 20),
+                        
+                        Form(
+                          key: _formKey,
+                          child: Column(
                             children: [
-                              Icon(Icons.add_a_photo, size: 50, color: Colors.grey),
-                              SizedBox(height: 8),
-                              Text(
-                                'Toca para seleccionar imagen\n(1080 x 1350 píxeles)',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(color: Colors.grey),
+                              TextFormField(
+                                controller: _nombreController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Nombre del lugar',
+                                  border: OutlineInputBorder(),
+                                ),
+                                validator: (value) {
+                                  if (value == null || value.isEmpty) {
+                                    return 'Por favor ingresa el nombre';
+                                  }
+                                  return null;
+                                },
+                              ),
+                              const SizedBox(height: 16),
+                              
+                              TextFormField(
+                                controller: _ubicacionController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Ubicación (Google Maps)',
+                                  border: OutlineInputBorder(),
+                                  helperText: 'Se generará automáticamente con GPS',
+                                ),
+                                readOnly: true,
+                                validator: (value) {
+                                  if (_currentPosition == null) {
+                                    return 'Se requiere ubicación GPS';
+                                  }
+                                  return null;
+                                },
+                              ),
+                              const SizedBox(height: 16),
+                              
+                              TextFormField(
+                                controller: _resenaController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Reseña',
+                                  border: OutlineInputBorder(),
+                                ),
+                                maxLines: 3,
+                                validator: (value) {
+                                  if (value == null || value.isEmpty) {
+                                    return 'Por favor ingresa una reseña';
+                                  }
+                                  return null;
+                                },
+                              ),
+                              const SizedBox(height: 16),
+                              
+                              TextFormField(
+                                controller: _descripcionController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Descripción',
+                                  border: OutlineInputBorder(),
+                                ),
+                                maxLines: 4,
+                                validator: (value) {
+                                  if (value == null || value.isEmpty) {
+                                    return 'Por favor ingresa una descripción';
+                                  }
+                                  return null;
+                                },
+                              ),
+                              const SizedBox(height: 16),
+                              
+                              Container(
+                                width: double.infinity,
+                                height: 200,
+                                decoration: BoxDecoration(
+                                  border: Border.all(color: Colors.grey),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: _imageBytes != null
+                                    ? ClipRRect(
+                                        borderRadius: BorderRadius.circular(8),
+                                        child: Image.memory(
+                                          _imageBytes!,
+                                          fit: BoxFit.cover,
+                                        ),
+                                      )
+                                    : InkWell(
+                                        onTap: _showImagePickerDialog,
+                                        child: const Column(
+                                          mainAxisAlignment: MainAxisAlignment.center,
+                                          children: [
+                                            Icon(Icons.add_a_photo, size: 50, color: Colors.grey),
+                                            SizedBox(height: 8),
+                                            Text(
+                                              'Toca para seleccionar imagen\n(1080 x 1350 píxeles)',
+                                              textAlign: TextAlign.center,
+                                              style: TextStyle(color: Colors.grey),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                              ),
+                              
+                              if (_imageBytes != null) ...[
+                                const SizedBox(height: 8),
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                                  children: [
+                                    TextButton.icon(
+                                      onPressed: _showImagePickerDialog,
+                                      icon: const Icon(Icons.edit),
+                                      label: const Text('Cambiar imagen'),
+                                    ),
+                                    TextButton.icon(
+                                      onPressed: () {
+                                        setState(() {
+                                          _imageBytes = null;
+                                          _imageName = null;
+                                        });
+                                      },
+                                      icon: const Icon(Icons.delete),
+                                      label: const Text('Eliminar'),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                              
+                              const SizedBox(height: 24),
+                              
+                              SizedBox(
+                                width: double.infinity,
+                                height: 50,
+                                child: ElevatedButton.icon(
+                                  onPressed: _isLoading ? null : _guardarLugar,
+                                  icon: _isLoading 
+                                      ? const SizedBox(
+                                          width: 20,
+                                          height: 20,
+                                          child: CircularProgressIndicator(strokeWidth: 2),
+                                        )
+                                      : const Icon(Icons.save),
+                                  label: Text(_isLoading ? 'Guardando...' : 'Guardar Lugar'),
+                                  style: ElevatedButton.styleFrom(
+                                    textStyle: const TextStyle(fontSize: 16),
+                                  ),
+                                ),
                               ),
                             ],
                           ),
                         ),
-                ),
-                
-                if (_imageBytes != null) ...[
-                  const SizedBox(height: 8),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      ],
+                    ),
+                  ),
+                  // Tab de Lugares Publicados
+                  Column(
                     children: [
-                      TextButton.icon(
-                        onPressed: _showImagePickerDialog,
-                        icon: const Icon(Icons.edit),
-                        label: const Text('Cambiar imagen'),
+                      const Padding(
+                        padding: EdgeInsets.all(16),
+                        child: Text(
+                          'Lugares Publicados',
+                          style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                        ),
                       ),
-                      TextButton.icon(
-                        onPressed: () {
-                          setState(() {
-                            _imageBytes = null;
-                            _imageName = null;
-                          });
-                        },
-                        icon: const Icon(Icons.delete),
-                        label: const Text('Eliminar'),
+                      Expanded(
+                        child: lugares.isEmpty
+                            ? const Center(
+                                child: Text(
+                                  'No hay lugares publicados',
+                                  style: TextStyle(fontSize: 16, color: Colors.grey),
+                                ),
+                              )
+                            : ListView.builder(
+                                itemCount: lugares.length,
+                                itemBuilder: (context, index) {
+                                  return _buildLugarCard(lugares[index]);
+                                },
+                              ),
                       ),
                     ],
                   ),
                 ],
-                
-                const SizedBox(height: 24),
-                
-                SizedBox(
-                  width: double.infinity,
-                  height: 50,
-                  child: ElevatedButton.icon(
-                    onPressed: _isLoading ? null : _guardarLugar,
-                    icon: _isLoading 
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.save),
-                    label: Text(_isLoading ? 'Guardando...' : 'Guardar Lugar'),
-                    style: ElevatedButton.styleFrom(
-                      textStyle: const TextStyle(fontSize: 16),
-                    ),
-                  ),
-                ),
-              ],
+              ),
             ),
-          ),
-          
-          const SizedBox(height: 40),
-          const Divider(),
-          const SizedBox(height: 20),
-          const Text(
-            'Lugares Publicados',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 10),
-          
-          // Lista de lugares
-          ListView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: lugares.length,
-            itemBuilder: (context, index) {
-              return _buildLugarCard(lugares[index]);
-            },
-          ),
-        ],
+          ],
+        ),
+        floatingActionButton: FloatingActionButton(
+          onPressed: _showPublicacionDialog,
+          backgroundColor: Colors.green,
+          foregroundColor: Colors.white,
+          child: const Icon(Icons.add),
+        ),
       ),
     );
   }
 
   Widget _buildVisitorView() {
-    return Column(
-      children: [
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            children: [
-              const Text(
-                '¡Bienvenido, Visitante!',
-                style: TextStyle(
-                  fontSize: 28,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.blue,
-                ),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 10),
-              const Text(
-                'Explora los mejores destinos turísticos',
-                style: TextStyle(fontSize: 16, color: Colors.grey),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 15),
-              ElevatedButton.icon(
-                onPressed: () => logout(context),
-                icon: const Icon(Icons.logout),
-                label: const Text('Cerrar Sesión'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red,
-                  foregroundColor: Colors.white,
-                ),
-              ),
-            ],
-          ),
-        ),
-        const Divider(),
-        Expanded(
-          child: lugares.isEmpty
-              ? const Center(
-                  child: Text(
-                    'No hay lugares turísticos disponibles',
-                    style: TextStyle(fontSize: 16, color: Colors.grey),
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        body: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                children: [
+                  const Text(
+                    '¡Bienvenido, Visitante!',
+                    style: TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.blue,
+                    ),
+                    textAlign: TextAlign.center,
                   ),
-                )
-              : ListView.builder(
-                  itemCount: lugares.length,
-                  itemBuilder: (context, index) {
-                    return _buildLugarCard(lugares[index]);
-                  },
-                ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Explora los mejores destinos turísticos',
+                    style: TextStyle(fontSize: 16, color: Colors.grey),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 15),
+                  ElevatedButton.icon(
+                    onPressed: () => logout(context),
+                    icon: const Icon(Icons.logout),
+                    label: const Text('Cerrar Sesión'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red,
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              color: Colors.blue,
+              child: const TabBar(
+                labelColor: Colors.white,
+                unselectedLabelColor: Colors.white70,
+                indicatorColor: Colors.white,
+                tabs: [
+                  Tab(icon: Icon(Icons.feed), text: 'Publicaciones'),
+                  Tab(icon: Icon(Icons.location_on), text: 'Lugares'),
+                ],
+              ),
+            ),
+            Expanded(
+              child: TabBarView(
+                children: [
+                  // Tab de Publicaciones
+                  publicaciones.isEmpty
+                      ? const Center(
+                          child: Text(
+                            'No hay publicaciones disponibles',
+                            style: TextStyle(fontSize: 16, color: Colors.grey),
+                          ),
+                        )
+                      : ListView.builder(
+                          itemCount: publicaciones.length,
+                          itemBuilder: (context, index) {
+                            return _buildPublicacionCard(publicaciones[index]);
+                          },
+                        ),
+                  // Tab de Lugares
+                  lugares.isEmpty
+                      ? const Center(
+                          child: Text(
+                            'No hay lugares turísticos disponibles',
+                            style: TextStyle(fontSize: 16, color: Colors.grey),
+                          ),
+                        )
+                      : ListView.builder(
+                          itemCount: lugares.length,
+                          itemBuilder: (context, index) {
+                            return _buildLugarCard(lugares[index]);
+                          },
+                        ),
+                ],
+              ),
+            ),
+          ],
         ),
-      ],
+      ),
     );
   }
 
@@ -766,11 +1218,12 @@ class _TurismoPageState extends State<TurismoPage> {
     _ubicacionController.dispose();
     _resenaController.dispose();
     _descripcionController.dispose();
+    _mensajeController.dispose();
     super.dispose();
   }
 }
 
-// Widget para manejar comentarios
+// Widget para manejar comentarios (sin cambios)
 class ComentariosView extends StatefulWidget {
   final dynamic lugarId;
   final String nombreLugar;
@@ -885,7 +1338,6 @@ class _ComentariosViewState extends State<ComentariosView> {
                       },
                     ),
         ),
-        // Solo mostrar el campo de comentario si es publicador
         if (widget.userRole == 'publicador')
           Container(
             padding: const EdgeInsets.all(16),
